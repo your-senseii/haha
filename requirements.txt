@@ -9,6 +9,7 @@ requests
 pathlib
 python-dotenv
 humanize
+hachoir
 #Deploy with Docker:
 
 #Build the Docker image: docker build -t udvash-bot .
