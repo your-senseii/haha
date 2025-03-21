@@ -508,34 +508,38 @@ class UdvashDownloader:
             # Parse with BeautifulSoup
             soup = BeautifulSoup(content_html, 'html.parser')
             
-            # Find all rows in the table
-            topic_rows = soup.find_all('tr')
-            if not topic_rows or len(topic_rows) < 2:  # Check if we have at least 2 rows
-                return None
+            # Try to find a strong tag with topic information (look for the second one, which is typically the topic)
+            # First, look for all strong tags or spans with strong inside
+            strong_elements = soup.find_all('strong')
+            if len(strong_elements) >= 2:
+                # The second strong element often contains the topic name
+                topic_text = strong_elements[1].get_text(strip=True)
+                self.logger.info(f"Extracted topic from strong element: {topic_text}")
+                return topic_text
                 
-            # Get the second row which contains the topic information
-            topic_row = topic_rows[1]  # Use index 1 instead of -1
-            if not topic_row:
-                return None
-                
-            # Get all cells in the row
-            topic_cells = topic_row.find_all('td')
-            if not topic_cells or len(topic_cells) < 3:  # Check if we have at least 3 cells
-                return None
-                
-            # Extract and clean the topic name from the last cell
-            topic_cell = topic_cells[2]  # Use index 2 for the 3rd column
-            if not topic_cell:
-                return None
-                
-            # Extract and clean the topic name
-            topic_name = topic_cell.get_text(strip=True)
+            # If we couldn't find the topic in strong tags, try looking for it in the table cells
+            # Get all table cells
+            all_cells = soup.find_all('td')
             
-            # Remove any "strong" or "span" tags effects and the "◾" character
-            topic_name = re.sub(r'^\s*◾\s*', '', topic_name)
+            # Look for the cell that contains the "◾" character or has topic-like content
+            for cell in all_cells:
+                cell_text = cell.get_text(strip=True)
+                if "◾" in cell_text or (len(cell_text) > 5 and not cell_text.startswith("🔸")):
+                    # Process to clean up the text
+                    topic_text = re.sub(r'^\s*◾\s*', '', cell_text)
+                    self.logger.info(f"Extracted topic from cell: {topic_text}")
+                    return topic_text
             
-            self.logger.info(f"Extracted topic: {topic_name}")
-            return topic_name
+            # If we still can't find a topic, look for the last non-empty cell as a fallback
+            non_empty_cells = [cell for cell in all_cells if cell.get_text(strip=True)]
+            if non_empty_cells:
+                topic_text = non_empty_cells[-1].get_text(strip=True)
+                topic_text = re.sub(r'^\s*◾\s*', '', topic_text)
+                self.logger.info(f"Extracted topic from last non-empty cell: {topic_text}")
+                return topic_text
+                
+            # If all else fails, return a default topic
+            return "General"
         except Exception as e:
             self.logger.error(f"Error extracting topic name: {str(e)}")
-            return None
+            return "Unknown Topic"  # Return a default value instead of None
