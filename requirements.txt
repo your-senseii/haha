@@ -8,3 +8,7 @@ bs4
 requests
 pathlib
 python-dotenv
+#Deploy with Docker:
+
+#Build the Docker image: docker build -t udvash-bot .
+#Run the container: docker run -d --env-file .env udvash-bot
