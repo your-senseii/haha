@@ -35,7 +35,7 @@ VIDEO_THUMBNAIL = "https://files.catbox.moe/f0o670.jpg"
 PDF_THUMBNAIL = "https://files.catbox.moe/mins6u.jpg"
 PROGRESS_BAR = """<b>\n ╭━━━━❰ᴘʀᴏɢʀᴇss ʙᴀʀ❱━➣ 
 ┣⪼ 🗃️ Sɪᴢᴇ: {1} | {2} 
-┣⪼ ⏳️ Dᴏɴᴇ : {0}% 
+┣⪼ ⏳️ Dᴏɴᴇ : {0:.2f}% 
 ┣⪼ 🚀 Sᴩᴇᴇᴅ: {3}/s 
 ┣⪼ ⏰️ Eᴛᴀ: {4} 
 ╰━━━━━━━━━━━━━━━➣ </b>"""
@@ -162,26 +162,6 @@ def require_auth(func):
     
     return wrapper
 
-import os
-import time
-import asyncio
-import aiohttp
-import logging
-import humanize
-import subprocess
-import shlex
-from typing import Optional, Dict, Any
-from pyrogram.errors import FloodWait
-
-# Assuming logger is configured elsewhere
-logger = logging.getLogger(__name__)
-
-# Progress bar format
-PROGRESS_BAR = """<b>Progress:</b> {0:.2f}%
-<b>Downloaded:</b> {1}/{2}
-<b>Speed:</b> {3}/s
-<b>ETA:</b> {4}"""
-
 # Store last progress message content for each message to avoid MESSAGE_NOT_MODIFIED errors
 last_progress_texts = {}
 last_update_times = {}
@@ -195,7 +175,7 @@ async def progress(current, total, message, start_time, progress_type, file_name
     now = time.time()
     
     # Implement debouncing - don't update too frequently
-    min_update_interval = 2.0  # Minimum seconds between updates
+    min_update_interval = 3.0  # Increase minimum seconds between updates
     if message_id in last_update_times:
         if now - last_update_times[message_id] < min_update_interval and current != total:
             return
@@ -256,22 +236,33 @@ async def monitor_download_progress(process, status_msg, file_path, current_chap
     filename = os.path.basename(file_path)
     start_time = time.time()
     last_size = 0
+    same_size_count = 0
+    max_same_size_checks = 5  # Number of consecutive checks with same size before considering download complete
     
     while process.poll() is None:
         if os.path.exists(file_path):
             current_size = os.path.getsize(file_path)
             
+            # Check if file size hasn't changed
+            if current_size == last_size:
+                same_size_count += 1
+            else:
+                same_size_count = 0
+                
             # For progress calculation, we need to estimate total size
-            # Since we don't know it yet, we'll use a placeholder that's always ahead
-            estimated_total = max(current_size * 1.5, 1024 * 1024)  # At least 1MB ahead
+            if same_size_count >= max_same_size_checks:
+                # If size hasn't changed for a while, assume download is complete
+                estimated_total = current_size  # Set total to current to show 100%
+            else:
+                estimated_total = max(current_size * 1.5, 1024 * 1024)  # At least 1MB ahead
             
-            if current_size > last_size:
+            if current_size > last_size or same_size_count >= max_same_size_checks:
                 await progress(
                     current_size, 
                     estimated_total, 
                     status_msg, 
                     start_time, 
-                    "⬇️ Downloading", 
+                    "⬇️ Downloading" if same_size_count < max_same_size_checks else "✅ Download Complete", 
                     filename,
                     current_chapter,
                     total_chapters
@@ -588,12 +579,12 @@ async def try_aria2c_download(url, file_path, file_type, status_msg=None, curren
         quoted_url = f"'{url}'"
         
         # Build command for aria2c with quoted URL
-        cmd = f"aria2c --file-allocation=none -j 32 -s 32 -x 32 " \
-              f"--min-split-size=1M --max-connection-per-server=16 --max-tries=5 " \
-              f"--retry-wait=5 --check-certificate=false --continue=true " \
-              f"--console-log-level=notice --summary-interval=1 " \
-              f"-o {shlex.quote(file_path)} {quoted_url}"
-        
+        cmd = f"aria2c --file-allocation=none -j 32 -s 32 -x 16 " \
+            f"--min-split-size=1M --max-tries=5 " \
+            f"--retry-wait=5 --check-certificate=false --continue=true " \
+            f"--console-log-level=notice --summary-interval=1 " \
+            f"-o {shlex.quote(file_path)} {quoted_url}"
+            
         process = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
@@ -737,10 +728,12 @@ async def try_direct_download(url, file_path, status_msg=None, current_chapter=N
                 else:
                     logger.error(f"Direct download failed with status code: {response.status}")
                     return False
-    
+    except Exception as e:
+        logger.error(f"Direct download error: {e}")
+        if status_msg:
+            await status_msg.edit(f"❌ Direct download error: {str(e)}")
+        return False
 
-
-# Modified process_chapter function with improved PDF handling
 async def process_chapter(client, user_id, status_msg, downloader, chapter, current_chapter, total_chapters, include_archive):
     try:
         async with download_semaphore:
@@ -753,11 +746,11 @@ async def process_chapter(client, user_id, status_msg, downloader, chapter, curr
             # Send chapter name to channel
             chapter_msg = await client.send_message(
                 DUMP_CHANNEL,
-                f"📚 **Chapter {current_chapter}/{total_chapters}**: {chapter_name}"
+                f"📚 ** {chapter_name}**"
             )
             
-            # Forward to user
-            await chapter_msg.forward(user_id)
+            # copy to user
+            await chapter_msg.copy(user_id)
             
             # Get content types from UdvashDownloader
             content_types, master_course_id, subject_id, master_chapter_id = downloader.get_content_types(chapter['url'], chapter['name'])
@@ -781,6 +774,9 @@ async def process_chapter(client, user_id, status_msg, downloader, chapter, curr
                     
                     topic_title = content_card["title"]
                     clean_title = re.sub(r'[<>:"/\\|?*]', '_', topic_title)  # Remove invalid filename chars
+                    
+                    # Get topic name for caption
+                    topic_name = content_card.get("topic", topic_title)  # Fallback to title if topic isn't available
                     
                     # Process video
                     video_url = downloader.extract_video_url(content_card["video_link"])
@@ -823,9 +819,9 @@ async def process_chapter(client, user_id, status_msg, downloader, chapter, curr
                         )
                         
                         try:
-                            # Upload video to dump channel
+                            # Upload video to dump channel with topic name in caption
                             start_time = time.time()
-                            caption = f"📹 **{topic_title}**\n\n📚 Chapter: {chapter_name}\n📁 Type: {content_type['name']}"
+                            caption = f"📹 **{topic_name}**\n\n📚 Chapter: {chapter_name}\n📁 Type: {content_type['name']}"
                             
                             video_msg = await client.send_video(
                                 DUMP_CHANNEL,
@@ -847,8 +843,8 @@ async def process_chapter(client, user_id, status_msg, downloader, chapter, curr
                                 )
                             )
                             
-                            # Forward to user
-                            await video_msg.forward(user_id)
+                            # copy to user
+                            await video_msg.copy(user_id)
                             
                             # Delete the file after successful upload
                             if os.path.exists(video_filename):
@@ -927,9 +923,9 @@ async def process_chapter(client, user_id, status_msg, downloader, chapter, curr
                         )
                         
                         try:
-                            # Upload PDF to dump channel
+                            # Upload PDF to dump channel with topic name in caption
                             start_time = time.time()
-                            caption = f"📄 **{topic_title}**\n\n📚 Chapter: {chapter_name}\n📁 Type: {content_type['name']}"
+                            caption = f"📄 **{topic_name}**\n\n📚 Chapter: {chapter_name}\n📁 Type: {content_type['name']}"
                             
                             pdf_msg = await client.send_document(
                                 DUMP_CHANNEL,
@@ -947,8 +943,8 @@ async def process_chapter(client, user_id, status_msg, downloader, chapter, curr
                                 )
                             )
                             
-                            # Forward to user
-                            await pdf_msg.forward(user_id)
+                            # copy to user
+                            await pdf_msg.copy(user_id)
                             
                             # Delete the file after successful upload
                             if os.path.exists(pdf_filename):
