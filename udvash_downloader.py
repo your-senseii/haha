@@ -508,20 +508,30 @@ class UdvashDownloader:
             # Parse with BeautifulSoup
             soup = BeautifulSoup(content_html, 'html.parser')
             
-            # Find the topic information (usually in the last row of the table)
-            topic_row = soup.find_all('tr')[-1]
+            # Find all rows in the table
+            topic_rows = soup.find_all('tr')
+            if not topic_rows or len(topic_rows) < 2:  # Check if we have at least 2 rows
+                return None
+                
+            # Get the second row which contains the topic information
+            topic_row = topic_rows[1]  # Use index 1 instead of -1
             if not topic_row:
                 return None
                 
-            # Get the text from the last cell which contains the topic name
-            topic_cell = topic_row.find_all('td')[-1]
+            # Get all cells in the row
+            topic_cells = topic_row.find_all('td')
+            if not topic_cells or len(topic_cells) < 3:  # Check if we have at least 3 cells
+                return None
+                
+            # Extract and clean the topic name from the last cell
+            topic_cell = topic_cells[2]  # Use index 2 for the 3rd column
             if not topic_cell:
                 return None
                 
             # Extract and clean the topic name
             topic_name = topic_cell.get_text(strip=True)
             
-            # Remove any "strong" or "span" tags effects
+            # Remove any "strong" or "span" tags effects and the "◾" character
             topic_name = re.sub(r'^\s*◾\s*', '', topic_name)
             
             self.logger.info(f"Extracted topic: {topic_name}")
