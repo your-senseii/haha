@@ -1,0 +1,10 @@
+pyrogram
+pyrofork
+tgcrypto
+tgcrypto-pyrofork
+aiohttp
+selenium
+bs4
+requests
+pathlib
+python-dotenv
