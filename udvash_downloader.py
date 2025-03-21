@@ -51,7 +51,7 @@ class UdvashDownloader:
     def setup_logger(self):
         """Set up logging configuration"""
         self.logger = logging.getLogger("udvash_downloader")
-        self.logger.setLevel(logging.INFO)
+        self.logger.setLevel(logging.WARNING)
         
         # Create formatter
         formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
@@ -267,6 +267,9 @@ class UdvashDownloader:
                     title_elem = card.find_element(By.CSS_SELECTOR, "h2.uuu-wrap-title")
                     title = title_elem.text.strip()
                     
+                    # Get topic name from content div
+                    topic = self.get_topic_from_content_card(card)
+                    
                     # Get video and note links
                     video_link = card.find_element(By.CSS_SELECTOR, "a.btn-video").get_attribute("href")
                     note_link = card.find_element(By.CSS_SELECTOR, "a.btn-note").get_attribute("href")
@@ -285,11 +288,12 @@ class UdvashDownloader:
                     cards.append({
                         'index': idx,
                         'title': title,
+                        'topic': topic,
                         'video_link': video_link,
                         'note_link': note_link,
                         'content_id': content_id
                     })
-                    self.logger.info(f"Found content card {idx}: {title} (ID: {content_id})")
+                    self.logger.info(f"Found content card {idx}: {title} (ID: {content_id}, Topic: {topic})")
                 except NoSuchElementException:
                     self.logger.warning(f"Skipping a card that doesn't have all required elements")
                 except Exception as e:
@@ -371,8 +375,14 @@ class UdvashDownloader:
         title = content_card['title']
         clean_title = re.sub(r'[<>:"/\\|?*]', '_', title)  # Remove invalid filename chars
         
-        # Create directory for the download
-        base_dir = os.path.join(self.download_dir, chapter_name, content_type_name)
+        # Use topic for directory structure if available
+        topic = content_card.get('topic')
+        if topic:
+            clean_topic = re.sub(r'[<>:"/\\|?*]', '_', topic)
+            base_dir = os.path.join(self.download_dir, chapter_name, content_type_name, clean_topic)
+        else:
+            base_dir = os.path.join(self.download_dir, chapter_name, content_type_name)
+        
         os.makedirs(base_dir, exist_ok=True)
         
         # Process English video
@@ -426,9 +436,6 @@ class UdvashDownloader:
                 self.logger.warning(f"No PDF URL found for English version of {title}")
         except Exception as e:
             self.logger.error(f"Error processing PDF content: {str(e)}")
-        
-        # Bangla version processing is commented out
-        # No processing for Bangla content
     
     def wait_for_downloads_to_complete(self):
         """Wait for all downloads to complete"""
@@ -486,4 +493,39 @@ class UdvashDownloader:
                 self.logger.info("WebDriver closed successfully")
         except Exception as e:
             self.logger.error(f"Error closing WebDriver: {str(e)}")
-        
+
+    def get_topic_from_content_card(self, card_element):
+        """Extract topic name from content card HTML"""
+        try:
+            # Find the content div
+            content_div = card_element.find_element(By.CSS_SELECTOR, "div.content")
+            if not content_div:
+                return None
+                
+            # Get the HTML content
+            content_html = content_div.get_attribute('innerHTML')
+            
+            # Parse with BeautifulSoup
+            soup = BeautifulSoup(content_html, 'html.parser')
+            
+            # Find the topic information (usually in the last row of the table)
+            topic_row = soup.find_all('tr')[-1]
+            if not topic_row:
+                return None
+                
+            # Get the text from the last cell which contains the topic name
+            topic_cell = topic_row.find_all('td')[-1]
+            if not topic_cell:
+                return None
+                
+            # Extract and clean the topic name
+            topic_name = topic_cell.get_text(strip=True)
+            
+            # Remove any "strong" or "span" tags effects
+            topic_name = re.sub(r'^\s*◾\s*', '', topic_name)
+            
+            self.logger.info(f"Extracted topic: {topic_name}")
+            return topic_name
+        except Exception as e:
+            self.logger.error(f"Error extracting topic name: {str(e)}")
+            return None
