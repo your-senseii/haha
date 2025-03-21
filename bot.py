@@ -7,9 +7,10 @@ import re
 import json
 import urllib.request
 import subprocess
+import shlex
 import math
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union, Any
 
 from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
@@ -161,12 +162,35 @@ def require_auth(func):
     
     return wrapper
 
-# Updated progress function for uploads and downloads
+import os
+import time
+import asyncio
+import aiohttp
+import logging
+import humanize
+import subprocess
+import shlex
+from typing import Optional, Dict, Any
+from pyrogram.errors import FloodWait
+
+# Assuming logger is configured elsewhere
+logger = logging.getLogger(__name__)
+
+# Progress bar format
+PROGRESS_BAR = """<b>Progress:</b> {0:.2f}%
+<b>Downloaded:</b> {1}/{2}
+<b>Speed:</b> {3}/s
+<b>ETA:</b> {4}"""
+
 # Store last progress message content for each message to avoid MESSAGE_NOT_MODIFIED errors
 last_progress_texts = {}
 last_update_times = {}
 
 async def progress(current, total, message, start_time, progress_type, file_name, current_chapter=None, total_chapters=None):
+    """
+    Monitor and display progress for uploads and downloads with debouncing
+    to avoid excessive message updates
+    """
     message_id = f"{message.chat.id}:{message.id}"
     now = time.time()
     
@@ -227,55 +251,57 @@ async def progress(current, total, message, start_time, progress_type, file_name
         if "MESSAGE_NOT_MODIFIED" not in str(e):
             logger.error(f"Error updating progress: {e}")
 
-# New function to monitor download progress from subprocess
-async def monitor_download_progress(process, message, file_path, current_chapter=None, total_chapters=None):
-    file_size = 0
-    last_size = 0
+async def monitor_download_progress(process, status_msg, file_path, current_chapter=None, total_chapters=None):
+    """Monitor the download progress of a subprocess using the file size"""
+    filename = os.path.basename(file_path)
     start_time = time.time()
-    last_update_time = start_time
-    
-    message_id = f"{message.chat.id}:{message.id}"
-    last_progress_texts[message_id] = ""  # Initialize entry in the tracking dictionary
+    last_size = 0
     
     while process.poll() is None:
-        try:
-            if os.path.exists(file_path):
-                new_size = os.path.getsize(file_path)
-                
-                # Check if file size has actually changed meaningfully
-                if new_size > file_size + 10240 or new_size == file_size == 0:  # 10KB threshold for updates
-                    file_size = new_size
-                    current_time = time.time()
-                    
-                    # Only update if more than 2 seconds have passed or it's a significant change
-                    if current_time - last_update_time >= 2 or (new_size - last_size) > 1048576:  # 1MB
-                        last_update_time = current_time
-                        last_size = new_size
-                        
-                        # Estimate total size (this is approximate)
-                        estimated_total = max(file_size * 1.5, file_size + 1048576)  # At least 1MB more
-                        
-                        await progress(
-                            file_size, 
-                            estimated_total, 
-                            message, 
-                            start_time, 
-                            "⬇️ Downloading", 
-                            os.path.basename(file_path),
-                            current_chapter,
-                            total_chapters
-                        )
-        except Exception as e:
-            logger.error(f"Error monitoring download: {e}")
+        if os.path.exists(file_path):
+            current_size = os.path.getsize(file_path)
+            
+            # For progress calculation, we need to estimate total size
+            # Since we don't know it yet, we'll use a placeholder that's always ahead
+            estimated_total = max(current_size * 1.5, 1024 * 1024)  # At least 1MB ahead
+            
+            if current_size > last_size:
+                await progress(
+                    current_size, 
+                    estimated_total, 
+                    status_msg, 
+                    start_time, 
+                    "⬇️ Downloading", 
+                    filename,
+                    current_chapter,
+                    total_chapters
+                )
+                last_size = current_size
         
-        await asyncio.sleep(2)  # Check less frequently
+        await asyncio.sleep(1)
     
-    # Final update after download completes
-    if os.path.exists(file_path):
-        final_size = os.path.getsize(file_path)
-        await progress(final_size, final_size, message, start_time, "✅ Download Complete", os.path.basename(file_path))
-        return final_size
-    return 0
+    # Get final output
+    stdout, stderr = process.communicate()
+    if stdout:
+        logger.info(f"Process stdout: {stdout}")
+    if stderr and process.returncode != 0:
+        logger.error(f"Process stderr: {stderr}")
+    
+    # Update progress one last time with final file size
+    final_size = os.path.getsize(file_path) if os.path.exists(file_path) else 0
+    if final_size > 0:
+        await progress(
+            final_size,
+            final_size,  # 100% complete
+            status_msg,
+            start_time,
+            "✅ Download Complete",
+            filename,
+            current_chapter,
+            total_chapters
+        )
+    
+    return final_size
 
 async def safe_edit_message(message, text):
     """Safely edit a message with proper error handling"""
@@ -511,89 +537,210 @@ async def status_command(client, message):
         await message.reply("ℹ️ No active downloads")
 
 
-# Updated download file function with progress monitoring
 async def download_file(url, file_path, file_type, status_msg=None, current_chapter=None, total_chapters=None):
-    """Download a file using aria2c as the main downloader with fallback to yt-dlp for videos"""
+    """Download a file using aria2c as the main downloader with fallback to yt-dlp for videos
+    and direct download for PDFs.
+    
+    Args:
+        url (str): URL of the file to download
+        file_path (str): Path where the file should be saved
+        file_type (str): Type of file ('video', 'pdf', etc.)
+        status_msg (Optional): Message object for progress updates
+        current_chapter (Optional[int]): Current chapter number for progress display
+        total_chapters (Optional[int]): Total number of chapters for progress display
+    
+    Returns:
+        bool: True if download was successful, False otherwise
+    """
     logger.info(f"Downloading {file_type} from {url}")
     
     try:
+        # Create directory if it doesn't exist
         os.makedirs(os.path.dirname(file_path), exist_ok=True)
         
-        # First try aria2c for all file types (now the main downloader)
-        try:
-            # Remove zero-size file if it exists
-            if os.path.exists(file_path):
-                os.remove(file_path)
-                
-            process = subprocess.Popen(
-                ["aria2c", "--file-allocation=none", "-j", "32", "-s", "32", "-x", "32", 
-                 "--min-split-size=1M", "--max-connection-per-server=16", "--max-tries=5",
-                 "--retry-wait=5", "--check-certificate=false", "--continue=true",
-                 "-o", file_path, url],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE
-            )
+        # Try aria2c first for all file types
+        if await try_aria2c_download(url, file_path, file_type, status_msg, current_chapter, total_chapters):
+            return True
             
-            if status_msg:
-                file_size = await monitor_download_progress(process, status_msg, file_path, current_chapter, total_chapters)
-            else:
-                process.wait()
-                file_size = os.path.getsize(file_path) if os.path.exists(file_path) else 0
+        # Fallback for video files
+        if file_type == "video" and await try_ytdlp_download(url, file_path, status_msg, current_chapter, total_chapters):
+            return True
             
-            # Check if file size is valid
-            if file_size > 0:
-                logger.info(f"Downloaded {file_type} using aria2c: {file_path} ({humanize.naturalsize(file_size)})")
-                return True
-            else:
-                logger.error(f"Aria2c downloaded a zero-size file, will try fallback method for video")
-                raise Exception("Zero-size file")
-                
-        except Exception as e:
-            logger.warning(f"aria2c failed: {str(e)}")
+        # Fallback for other files (like PDFs)
+        if await try_direct_download(url, file_path, status_msg, current_chapter, total_chapters):
+            return True
             
-            # Only try yt-dlp as fallback for videos
-            if file_type == "video":
-                logger.info("Trying yt-dlp as fallback for video")
-                # If aria2c fails, try yt-dlp for videos
-                try:
-                    # Remove zero-size file if it exists
-                    if os.path.exists(file_path):
-                        os.remove(file_path)
-                        
-                    process = subprocess.Popen(
-                        ["yt-dlp", "-N", "32", "--no-check-certificate", "--no-warnings", 
-                         "--prefer-ffmpeg", "--hls-prefer-native", "--downloader-args", 
-                         "ffmpeg:-nostats -loglevel 0", "-o", file_path, url],
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE
-                    )
-                    
-                    if status_msg:
-                        file_size = await monitor_download_progress(process, status_msg, file_path, current_chapter, total_chapters)
-                    else:
-                        process.wait()
-                        file_size = os.path.getsize(file_path) if os.path.exists(file_path) else 0
-                    
-                    # Check if file size is valid
-                    if file_size > 0:
-                        logger.info(f"Downloaded video using yt-dlp: {file_path} ({humanize.naturalsize(file_size)})")
-                        return True
-                    else:
-                        logger.error(f"yt-dlp downloaded a zero-size file")
-                        return False
-                        
-                except Exception as e:
-                    logger.error(f"Both download methods failed: {str(e)}")
-                    return False
-            else:
-                logger.error(f"Failed to download {file_type} with aria2c and no fallback available")
-                return False
+        logger.error(f"All download methods failed for {file_type}: {url}")
+        return False
+        
     except Exception as e:
         logger.error(f"Error in download_file: {str(e)}")
         return False
 
+async def try_aria2c_download(url, file_path, file_type, status_msg=None, current_chapter=None, total_chapters=None):
+    """Try downloading with aria2c"""
+    try:
+        # Remove zero-size file if it exists
+        if os.path.exists(file_path):
+            os.remove(file_path)
+            
+        # Properly quote the URL for shell
+        quoted_url = f"'{url}'"
+        
+        # Build command for aria2c with quoted URL
+        cmd = f"aria2c --file-allocation=none -j 32 -s 32 -x 32 " \
+              f"--min-split-size=1M --max-connection-per-server=16 --max-tries=5 " \
+              f"--retry-wait=5 --check-certificate=false --continue=true " \
+              f"--console-log-level=notice --summary-interval=1 " \
+              f"-o {shlex.quote(file_path)} {quoted_url}"
+        
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            shell=True,  # Using shell=True to properly handle quoted URLs
+            text=True
+        )
+        
+        if status_msg:
+            file_size = await monitor_download_progress(process, status_msg, file_path, current_chapter, total_chapters)
+        else:
+            stdout, stderr = process.communicate()
+            logger.info(f"aria2c stdout: {stdout}")
+            if stderr:
+                logger.error(f"aria2c stderr: {stderr}")
+            file_size = os.path.getsize(file_path) if os.path.exists(file_path) else 0
+        
+        # Check if file size is valid
+        if file_size > 0:
+            logger.info(f"Downloaded {file_type} using aria2c: {file_path} ({humanize.naturalsize(file_size)})")
+            return True
+        else:
+            logger.error(f"Aria2c downloaded a zero-size file")
+            if os.path.exists(file_path):
+                os.remove(file_path)
+            return False
+            
+    except Exception as e:
+        logger.warning(f"aria2c download failed: {str(e)}")
+        return False
 
-# Updated process_chapter function with better error handling and file deletion
+async def try_ytdlp_download(url, file_path, status_msg=None, current_chapter=None, total_chapters=None):
+    """Try downloading video with yt-dlp"""
+    try:
+        logger.info("Trying yt-dlp as fallback for video")
+        
+        # Remove zero-size file if it exists
+        if os.path.exists(file_path):
+            os.remove(file_path)
+        
+        # Properly quote the URL for shell
+        quoted_url = f"'{url}'"
+        
+        # Build command for yt-dlp with quoted URL
+        cmd = f"yt-dlp -N 32 --no-check-certificate --no-warnings " \
+              f"--prefer-ffmpeg --hls-prefer-native " \
+              f"--downloader-args \"ffmpeg:-nostats -loglevel 0\" " \
+              f"-o {shlex.quote(file_path)} {quoted_url}"
+            
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            shell=True,  # Using shell=True to properly handle quoted URLs
+            text=True
+        )
+        
+        if status_msg:
+            file_size = await monitor_download_progress(process, status_msg, file_path, current_chapter, total_chapters)
+        else:
+            stdout, stderr = process.communicate()
+            logger.info(f"yt-dlp stdout: {stdout}")
+            if stderr:
+                logger.error(f"yt-dlp stderr: {stderr}")
+            file_size = os.path.getsize(file_path) if os.path.exists(file_path) else 0
+        
+        # Check if file size is valid
+        if file_size > 0:
+            logger.info(f"Downloaded video using yt-dlp: {file_path} ({humanize.naturalsize(file_size)})")
+            return True
+        else:
+            logger.error(f"yt-dlp downloaded a zero-size file")
+            if os.path.exists(file_path):
+                os.remove(file_path)
+            return False
+            
+    except Exception as e:
+        logger.error(f"yt-dlp download failed: {str(e)}")
+        return False
+
+async def try_direct_download(url, file_path, status_msg=None, current_chapter=None, total_chapters=None):
+    """Try direct download using aiohttp"""
+    try:
+        logger.info(f"Trying direct download using requests")
+        if status_msg:
+            await status_msg.edit(f"⬇️ Trying direct download: {os.path.basename(file_path)}")
+        
+        # Starting time for progress
+        start_time = time.time()
+        
+        # Using aiohttp for async download
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, allow_redirects=True, timeout=30) as response:
+                if response.status == 200:
+                    total_size = int(response.headers.get('content-length', 0))
+                    downloaded_size = 0
+                    
+                    with open(file_path, 'wb') as f:
+                        while True:
+                            chunk = await response.content.read(1024 * 1024)  # 1MB chunks
+                            if not chunk:
+                                break
+                            
+                            f.write(chunk)
+                            downloaded_size += len(chunk)
+                            
+                            # Update progress
+                            if status_msg and total_size > 0:
+                                await progress(
+                                    downloaded_size, 
+                                    total_size, 
+                                    status_msg, 
+                                    start_time, 
+                                    "⬇️ Direct downloading", 
+                                    os.path.basename(file_path),
+                                    current_chapter,
+                                    total_chapters
+                                )
+                    
+                    file_size = os.path.getsize(file_path)
+                    if file_size > 0:
+                        # Final progress update
+                        if status_msg:
+                            await progress(
+                                file_size,
+                                file_size,
+                                status_msg,
+                                start_time,
+                                "✅ Download Complete",
+                                os.path.basename(file_path),
+                                current_chapter,
+                                total_chapters
+                            )
+                        logger.info(f"Downloaded file using direct method: {file_path} ({humanize.naturalsize(file_size)})")
+                        return True
+                    else:
+                        logger.error("Direct download resulted in zero-size file")
+                        if os.path.exists(file_path):
+                            os.remove(file_path)
+                        return False
+                else:
+                    logger.error(f"Direct download failed with status code: {response.status}")
+                    return False
+    
+
+
+# Modified process_chapter function with improved PDF handling
 async def process_chapter(client, user_id, status_msg, downloader, chapter, current_chapter, total_chapters, include_archive):
     try:
         async with download_semaphore:
@@ -638,11 +785,14 @@ async def process_chapter(client, user_id, status_msg, downloader, chapter, curr
                     # Process video
                     video_url = downloader.extract_video_url(content_card["video_link"])
                     if video_url:
+                        # Log the extracted video URL for debugging
+                        logger.info(f"Extracted video URL: {video_url}")
+                        
                         video_filename = f"downloads/{user_id}/{chapter_name}/{content_type['name']}/{clean_title}.mp4"
                         os.makedirs(os.path.dirname(video_filename), exist_ok=True)
                         
                         # Download video with status updates
-                        await status_msg.edit(f"⬇️ Downloading video: {topic_title} ({current_chapter}/{total_chapters})")
+                        await status_msg.edit(f"⬇️ Preparing to download video: {topic_title} ({current_chapter}/{total_chapters})")
                         
                         # Use updated download_file function with progress
                         download_success = await download_file(
@@ -714,11 +864,14 @@ async def process_chapter(client, user_id, status_msg, downloader, chapter, curr
                     # Process PDF
                     pdf_url = downloader.extract_pdf_url(content_card["note_link"])
                     if pdf_url:
+                        # Log the extracted PDF URL for debugging
+                        logger.info(f"Extracted PDF URL: {pdf_url}")
+                        
                         pdf_filename = f"downloads/{user_id}/{chapter_name}/{content_type['name']}/{clean_title}.pdf"
                         os.makedirs(os.path.dirname(pdf_filename), exist_ok=True)
                         
                         # Download PDF with status updates
-                        await status_msg.edit(f"⬇️ Downloading PDF: {topic_title} ({current_chapter}/{total_chapters})")
+                        await status_msg.edit(f"⬇️ Preparing to download PDF: {topic_title} ({current_chapter}/{total_chapters})")
                         
                         # Use updated download_file function with progress
                         download_success = await download_file(
@@ -729,6 +882,34 @@ async def process_chapter(client, user_id, status_msg, downloader, chapter, curr
                             current_chapter,
                             total_chapters
                         )
+                        
+                        if not download_success:
+                            # Try downloading PDF using direct urllib method as a fallback
+                            await status_msg.edit(f"⬇️ Trying another method for PDF: {topic_title}")
+                            try:
+                                # Use urllib with proper headers for direct PDF download
+                                headers = {
+                                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                                    'Accept-Language': 'en-US,en;q=0.5',
+                                    'Connection': 'keep-alive',
+                                    'Upgrade-Insecure-Requests': '1'
+                                }
+                                
+                                request = urllib.request.Request(pdf_url, headers=headers)
+                                with urllib.request.urlopen(request) as response, open(pdf_filename, 'wb') as out_file:
+                                    data = response.read()
+                                    out_file.write(data)
+                                
+                                if os.path.exists(pdf_filename) and os.path.getsize(pdf_filename) > 0:
+                                    download_success = True
+                                    logger.info(f"PDF downloaded using urllib fallback: {pdf_filename}")
+                                else:
+                                    logger.error(f"urllib fallback downloaded zero-size PDF")
+                                    download_success = False
+                            except Exception as e:
+                                logger.error(f"All PDF download methods failed: {str(e)}")
+                                download_success = False
                         
                         if not download_success:
                             await status_msg.edit(f"❌ Failed to download PDF: {topic_title}")

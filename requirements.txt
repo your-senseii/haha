@@ -13,4 +13,4 @@ hachoir
 #Deploy with Docker:
 
 #Build the Docker image: docker build -t udvash-bot .
-#Run the container: docker run -d --env-file .env udvash-bot
+#Run the container: docker run -d  udvash-bot
