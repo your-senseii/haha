@@ -64,6 +64,77 @@ download_tasks = {}
 active_downloads = 0
 max_parallel_downloads = 3
 download_semaphore = asyncio.Semaphore(max_parallel_downloads)
+# Health check endpoint for Koyeb
+# Health check endpoint for Koyeb with proper error handling
+async def health_check_server():
+    try:
+        # Make sure aiohttp.web is properly imported
+        from aiohttp import web
+        
+        # Create application
+        app = web.Application()
+        
+        # Simple health check handler
+        async def health_handler(request):
+            return web.Response(text="Healthy", status=200)
+        
+        # Add routes
+        app.router.add_get("/health", health_handler)
+        app.router.add_get("/", health_handler)  # Also respond to root path
+        
+        # Set up the server
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, '0.0.0.0', 8080)
+        
+        # Start the site
+        await site.start()
+        
+        logger.info("Health check server started on port 8080")
+        
+        # Return the runner so it can be cleaned up later if needed
+        return runner
+        
+    except ImportError as e:
+        logger.error(f"Error importing aiohttp.web: {e}")
+        logger.error("Make sure you have installed aiohttp with: pip install aiohttp")
+        
+    except Exception as e:
+        logger.error(f"Error starting health check server: {e}")
+        
+        # Try alternate implementation with a simple socket if aiohttp fails
+        try:
+            import socket
+            import threading
+            
+            def socket_server():
+                server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                server.bind(('0.0.0.0', 8080))
+                server.listen(5)
+                
+                logger.info("Started fallback socket health check server on port 8080")
+                
+                while True:
+                    try:
+                        client, addr = server.accept()
+                        data = client.recv(1024)
+                        
+                        if data:
+                            response = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 7\r\n\r\nHealthy"
+                            client.send(response.encode())
+                        
+                        client.close()
+                    except Exception as e:
+                        logger.error(f"Error in socket server: {e}")
+            
+            # Start the socket server in a thread
+            thread = threading.Thread(target=socket_server, daemon=True)
+            thread.start()
+            logger.info("Fallback health check server started in thread")
+            
+        except Exception as socket_error:
+            logger.error(f"Also failed to start socket server: {socket_error}")
 
 # Store thumbnails
 async def download_thumbnails():
@@ -95,121 +166,115 @@ def require_auth(func):
 last_progress_texts = {}
 last_update_times = {}
 
-# Store last progress texts to avoid MESSAGE_NOT_MODIFIED errors
-last_progress_texts = {}
-
 async def progress(current, total, message, start_time, progress_type, file_name, current_chapter=None, total_chapters=None):
+    message_id = f"{message.chat.id}:{message.id}"
     now = time.time()
+    
+    # Implement debouncing - don't update too frequently
+    min_update_interval = 2.0  # Minimum seconds between updates
+    if message_id in last_update_times:
+        if now - last_update_times[message_id] < min_update_interval and current != total:
+            return
+    
     diff = now - start_time
     
-    # Generate a unique ID for this message
-    message_id = f"{message.chat.id}:{message.id}"
-    
-    if diff < 1:
+    if diff < 0.5:
         return
     
-    # Only update every 3 seconds or on completion
-    if round(diff % 3) != 0 and current != total:
-        return
-    
+    # Update more frequently, but still check content difference
     speed = current / diff if diff > 0 else 0
     percentage = current * 100 / total if total > 0 else 0
     
-    # Format numbers with more precision to avoid identical strings
+    # Use more decimal places to create more variation
+    percentage_str = f"{percentage:.3f}"
+    
+    elapsed_time = round(diff)
+    eta = round((total - current) / speed) if speed > 0 else 0
+    
     current_size = humanize.naturalsize(current)
     total_size = humanize.naturalsize(total)
     speed_str = humanize.naturalsize(speed)
     
-    elapsed_time = round(diff)
-    eta = round((total - current) / speed) if speed > 0 else 0
+    elapsed_str = humanize.naturaltime(elapsed_time)
     eta_str = humanize.naturaltime(eta) if eta else "0 seconds"
     
     chapter_info = f"Chapter {current_chapter}/{total_chapters} | " if current_chapter and total_chapters else ""
     
     progress_text = PROGRESS_BAR.format(
-        round(percentage, 2),
+        float(percentage_str),
         current_size,
         total_size,
         speed_str,
         eta_str
     )
     
-    # Create full message text
-    full_text = f"<b>{chapter_info}{progress_type}</b>\n\n<code>{file_name}</code>\n\n{progress_text}"
+    # Create the full message text
+    full_message = f"<b>{chapter_info}{progress_type}</b>\n\n<code>{file_name}</code>\n\n{progress_text}"
     
-    # Print to terminal for debugging
-    print(f"Progress: {percentage:.2f}% | Speed: {speed_str}/s | ETA: {eta_str}")
-    
-    # Skip update if content hasn't changed
-    if message_id in last_progress_texts and last_progress_texts[message_id] == full_text:
+    # Check if message content actually changed
+    if message_id in last_progress_texts and last_progress_texts[message_id] == full_message and current != total:
         return
     
-    # Update tracker
-    last_progress_texts[message_id] = full_text
-    
     try:
-        await message.edit(full_text)
+        await message.edit(full_message)
+        # Store the content and update time for future comparison
+        last_progress_texts[message_id] = full_message
+        last_update_times[message_id] = now
     except FloodWait as e:
         await asyncio.sleep(e.x)
     except Exception as e:
-        # Log but don't crash on edit errors
+        # Ignore MESSAGE_NOT_MODIFIED errors
         if "MESSAGE_NOT_MODIFIED" not in str(e):
-            logger.error(f"Progress update error: {e}")
+            logger.error(f"Error updating progress: {e}")
 
 # New function to monitor download progress from subprocess
 async def monitor_download_progress(process, message, file_path, current_chapter=None, total_chapters=None):
     file_size = 0
+    last_size = 0
     start_time = time.time()
-    last_terminal_update = start_time
+    last_update_time = start_time
+    
+    message_id = f"{message.chat.id}:{message.id}"
+    last_progress_texts[message_id] = ""  # Initialize entry in the tracking dictionary
     
     while process.poll() is None:
         try:
             if os.path.exists(file_path):
                 new_size = os.path.getsize(file_path)
-                if new_size != file_size:
+                
+                # Check if file size has actually changed meaningfully
+                if new_size > file_size + 10240 or new_size == file_size == 0:  # 10KB threshold for updates
                     file_size = new_size
-                    now = time.time()
+                    current_time = time.time()
                     
-                    # Always log to terminal every second
-                    if now - last_terminal_update >= 1:
-                        last_terminal_update = now
-                        elapsed = now - start_time
-                        speed = file_size / elapsed if elapsed > 0 else 0
+                    # Only update if more than 2 seconds have passed or it's a significant change
+                    if current_time - last_update_time >= 2 or (new_size - last_size) > 1048576:  # 1MB
+                        last_update_time = current_time
+                        last_size = new_size
                         
-                        # Print detailed progress to terminal
-                        print(f"\nDownload Progress - {os.path.basename(file_path)}:")
-                        print(f"Size: {humanize.naturalsize(file_size)}")
-                        print(f"Speed: {humanize.naturalsize(speed)}/s")
-                        print(f"Elapsed: {elapsed:.1f}s")
-                    
-                    # Estimate total size
-                    estimated_total = max(file_size * 1.5, file_size + 1048576)
-                    
-                    # Update Telegram message less frequently
-                    await progress(
-                        file_size,
-                        estimated_total,
-                        message,
-                        start_time,
-                        "⬇️ Downloading",
-                        os.path.basename(file_path),
-                        current_chapter,
-                        total_chapters
-                    )
+                        # Estimate total size (this is approximate)
+                        estimated_total = max(file_size * 1.5, file_size + 1048576)  # At least 1MB more
+                        
+                        await progress(
+                            file_size, 
+                            estimated_total, 
+                            message, 
+                            start_time, 
+                            "⬇️ Downloading", 
+                            os.path.basename(file_path),
+                            current_chapter,
+                            total_chapters
+                        )
         except Exception as e:
             logger.error(f"Error monitoring download: {e}")
-            print(f"Error monitoring download: {e}")
         
-        await asyncio.sleep(2)
+        await asyncio.sleep(2)  # Check less frequently
     
     # Final update after download completes
     if os.path.exists(file_path):
         final_size = os.path.getsize(file_path)
-        print(f"\nDownload completed: {os.path.basename(file_path)} - {humanize.naturalsize(final_size)}")
         await progress(final_size, final_size, message, start_time, "✅ Download Complete", os.path.basename(file_path))
         return final_size
-    
-    print(f"Download failed or empty file: {file_path}")
     return 0
 
 async def safe_edit_message(message, text):
@@ -445,206 +510,89 @@ async def status_command(client, message):
     else:
         await message.reply("ℹ️ No active downloads")
 
-# Health check endpoint for Koyeb
-# async def health_check_server():
-#     app = aiohttp.web.Application()
-    
-#     async def health_handler(request):
-#         return aiohttp.web.Response(text="Healthy", status=200)
-    
-#     app.router.add_get("/health", health_handler)
-    
-#     runner = aiohttp.web.AppRunner(app)
-#     await runner.setup()
-#     site = aiohttp.web.TCPSite(runner, '0.0.0.0', 8080)
-#     await site.start()
-    
-#     logger.info("Health check server started on port 8080")
 
 # Updated download file function with progress monitoring
-
-# Add to imports
-import re
-
-# Use this for aria2c download
-async def download_with_aria2c(url, file_path, status_msg=None, current_chapter=None, total_chapters=None):
-    print(f"Starting aria2c download: {url} -> {file_path}")
-    
-    # Command with more verbose output
-    cmd = [
-        "aria2c", 
-        "--console-log-level=notice",
-        "--summary-interval=1",
-        "--show-console-readout=true",
-        "-j", "32", 
-        "-s", "16", 
-        "-x", "16", 
-        "-o", file_path, 
-        url
-    ]
-    
-    process = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,  # Combine stdout and stderr
-        universal_newlines=True,   # Text mode
-        bufsize=1                  # Line buffered
-    )
-    
-    start_time = time.time()
-    file_size = 0
-    total_size = 0
-    speed = 0
-    progress_percent = 0
-    
-    # Regular expressions to extract information
-    size_pattern = re.compile(r'TOTAL:(\d+)B/(\d+)B')
-    speed_pattern = re.compile(r'SPD:(\d+(?:\.\d+)?)([KMG])B/s')
-    percent_pattern = re.compile(r'\((\d+)%\)')
-    
-    try:
-        for line in iter(process.stdout.readline, ''):
-            # Print to console for debugging
-            print(line.strip())
-            
-            # Extract download size
-            size_match = size_pattern.search(line)
-            if size_match:
-                file_size = int(size_match.group(1))
-                total_size = int(size_match.group(2))
-            
-            # Extract speed
-            speed_match = speed_pattern.search(line)
-            if speed_match:
-                speed_val = float(speed_match.group(1))
-                speed_unit = speed_match.group(2)
-                
-                # Convert to bytes/s
-                if speed_unit == 'K':
-                    speed = speed_val * 1024
-                elif speed_unit == 'M':
-                    speed = speed_val * 1024 * 1024
-                elif speed_unit == 'G':
-                    speed = speed_val * 1024 * 1024 * 1024
-            
-            # Extract percentage
-            percent_match = percent_pattern.search(line)
-            if percent_match:
-                progress_percent = int(percent_match.group(1))
-            
-            # Update Telegram progress
-            if status_msg and total_size > 0 and (time.time() - start_time > 2):
-                try:
-                    await progress(
-                        file_size,
-                        total_size,
-                        status_msg,
-                        start_time,
-                        "⬇️ Downloading with aria2c",
-                        os.path.basename(file_path),
-                        current_chapter,
-                        total_chapters
-                    )
-                except Exception as e:
-                    print(f"Error updating progress: {e}")
-    
-    except Exception as e:
-        print(f"Error monitoring aria2c: {e}")
-    
-    process.wait()
-    
-    # Return true if download succeeded
-    if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
-        print(f"aria2c download completed: {file_path}")
-        return True
-    
-    print(f"aria2c download failed: {file_path}")
-    return False
-
-# Helper function to print subprocess output
-async def print_subprocess_output(process, name):
-    """Read and print output from subprocess to terminal"""
-    try:
-        for line in iter(process.stdout.readline, ''):
-            if line:
-                print(f"[{name}] {line.strip()}")
-            else:
-                break
-                
-        for line in iter(process.stderr.readline, ''):
-            if line:
-                print(f"[{name} ERR] {line.strip()}")
-            else:
-                break
-    except Exception as e:
-        print(f"Error reading {name} output: {e}")
-
 async def download_file(url, file_path, file_type, status_msg=None, current_chapter=None, total_chapters=None):
-    """Download a file using aria2c or yt-dlp based on file type with progress monitoring"""
+    """Download a file using aria2c as the main downloader with fallback to yt-dlp for videos"""
     logger.info(f"Downloading {file_type} from {url}")
-    print(f"\n>>> Starting download: {file_type} - {os.path.basename(file_path)}")
     
     try:
         os.makedirs(os.path.dirname(file_path), exist_ok=True)
         
-        if file_type == "video":
-            # First try yt-dlp
-            try:
-                print(f"Attempting yt-dlp download for {url}")
-                process = subprocess.Popen(
-                    ["yt-dlp", "-N", "64", "-o", file_path, url],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,  # Use text mode for readable output
-                    bufsize=1    # Line buffered
-                )
-                
-                # Start a task to read and print output
-                asyncio.create_task(print_subprocess_output(process, "yt-dlp"))
-                
-                if status_msg:
-                    file_size = await monitor_download_progress(process, status_msg, file_path, current_chapter, total_chapters)
-                else:
-                    process.wait()
-                    file_size = os.path.getsize(file_path) if os.path.exists(file_path) else 0
-                
-            except Exception as e:
-                logger.warning(f"yt-dlp failed, trying aria2c: {str(e)}")
-                print(f"yt-dlp failed, trying aria2c: {str(e)}")
-                
-                # Remove zero-size file if it exists
-                if os.path.exists(file_path):
-                    os.remove(file_path)
-                
-                # Use our new aria2c function
-                aria2c_success = await download_with_aria2c(
-                    url, 
-                    file_path, 
-                    status_msg, 
-                    current_chapter, 
-                    total_chapters
-                )
-                
-                return aria2c_success
-        else:  # PDF
+        # First try aria2c for all file types (now the main downloader)
+        try:
             # Remove zero-size file if it exists
             if os.path.exists(file_path):
                 os.remove(file_path)
-            
-            # Use our new aria2c function for PDFs too
-            return await download_with_aria2c(
-                url, 
-                file_path, 
-                status_msg, 
-                current_chapter, 
-                total_chapters
+                
+            process = subprocess.Popen(
+                ["aria2c", "--file-allocation=none", "-j", "32", "-s", "32", "-x", "32", 
+                 "--min-split-size=1M", "--max-connection-per-server=16", "--max-tries=5",
+                 "--retry-wait=5", "--check-certificate=false", "--continue=true",
+                 "-o", file_path, url],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
             )
             
+            if status_msg:
+                file_size = await monitor_download_progress(process, status_msg, file_path, current_chapter, total_chapters)
+            else:
+                process.wait()
+                file_size = os.path.getsize(file_path) if os.path.exists(file_path) else 0
+            
+            # Check if file size is valid
+            if file_size > 0:
+                logger.info(f"Downloaded {file_type} using aria2c: {file_path} ({humanize.naturalsize(file_size)})")
+                return True
+            else:
+                logger.error(f"Aria2c downloaded a zero-size file, will try fallback method for video")
+                raise Exception("Zero-size file")
+                
+        except Exception as e:
+            logger.warning(f"aria2c failed: {str(e)}")
+            
+            # Only try yt-dlp as fallback for videos
+            if file_type == "video":
+                logger.info("Trying yt-dlp as fallback for video")
+                # If aria2c fails, try yt-dlp for videos
+                try:
+                    # Remove zero-size file if it exists
+                    if os.path.exists(file_path):
+                        os.remove(file_path)
+                        
+                    process = subprocess.Popen(
+                        ["yt-dlp", "-N", "32", "--no-check-certificate", "--no-warnings", 
+                         "--prefer-ffmpeg", "--hls-prefer-native", "--downloader-args", 
+                         "ffmpeg:-nostats -loglevel 0", "-o", file_path, url],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE
+                    )
+                    
+                    if status_msg:
+                        file_size = await monitor_download_progress(process, status_msg, file_path, current_chapter, total_chapters)
+                    else:
+                        process.wait()
+                        file_size = os.path.getsize(file_path) if os.path.exists(file_path) else 0
+                    
+                    # Check if file size is valid
+                    if file_size > 0:
+                        logger.info(f"Downloaded video using yt-dlp: {file_path} ({humanize.naturalsize(file_size)})")
+                        return True
+                    else:
+                        logger.error(f"yt-dlp downloaded a zero-size file")
+                        return False
+                        
+                except Exception as e:
+                    logger.error(f"Both download methods failed: {str(e)}")
+                    return False
+            else:
+                logger.error(f"Failed to download {file_type} with aria2c and no fallback available")
+                return False
     except Exception as e:
         logger.error(f"Error in download_file: {str(e)}")
-        print(f"Error in download_file: {str(e)}")
         return False
-    
+
+
 # Updated process_chapter function with better error handling and file deletion
 async def process_chapter(client, user_id, status_msg, downloader, chapter, current_chapter, total_chapters, include_archive):
     try:
@@ -961,14 +909,17 @@ async def cleanup_command(client, message):
 # Main function
 async def main():
     await download_thumbnails()
-    # await health_check_server()
+    await health_check_server()
+    
+    # Start the client (Pyrogram doesn't use await for start/stop)
     await app.start()
     
     try:
         # Keep the bot running
         await asyncio.Event().wait()
     finally:
-        await app.stop()
+        # Stop the client (Pyrogram doesn't use await for start/stop)
+        app.stop()
 
 if __name__ == "__main__":
     loop = asyncio.get_event_loop()
