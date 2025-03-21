@@ -12,5 +12,6 @@ humanize
 hachoir
 #Deploy with Docker:
 
-#Build the Docker image: docker build -t udvash-bot .
-#Run the container: docker run -d  udvash-bot
+#Build the Docker image: docker build -t udvash .
+#Run the container: docker run -d  --name udvash udvash
+#log : docker logs -f udvash
