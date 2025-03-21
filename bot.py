@@ -30,8 +30,8 @@ ADMINS = [int(admin) for admin in os.environ.get("ADMINS", "7354647629,788162167
 LOG_CHANNEL = os.environ.get("LOG_CHANNEL")
 
 # Constants
-VIDEO_THUMBNAIL = "https://files.catbox.moe/0h377l.jpg"
-PDF_THUMBNAIL = "https://files.catbox.moe/0h377l.jpg"
+VIDEO_THUMBNAIL = "https://files.catbox.moe/f0o670.jpg"
+PDF_THUMBNAIL = "https://files.catbox.moe/mins6u.jpg"
 PROGRESS_BAR = """<b>\n ╭━━━━❰ᴘʀᴏɢʀᴇss ʙᴀʀ❱━➣ 
 ┣⪼ 🗃️ Sɪᴢᴇ: {1} | {2} 
 ┣⪼ ⏳️ Dᴏɴᴇ : {0}% 
