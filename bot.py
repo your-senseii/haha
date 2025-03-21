@@ -7,11 +7,10 @@ import re
 import json
 import urllib.request
 import subprocess
-import shlex
 import math
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple, Union, Any
-
+from typing import Dict, List, Optional, Tuple, Union
+import shlex
 from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 from pyrogram.errors import FloodWait
@@ -35,12 +34,10 @@ VIDEO_THUMBNAIL = "https://files.catbox.moe/f0o670.jpg"
 PDF_THUMBNAIL = "https://files.catbox.moe/mins6u.jpg"
 PROGRESS_BAR = """<b>\n ╭━━━━❰ᴘʀᴏɢʀᴇss ʙᴀʀ❱━➣ 
 ┣⪼ 🗃️ Sɪᴢᴇ: {1} | {2} 
-┣⪼ ⏳️ Dᴏɴᴇ : {0:.2f}% 
+┣⪼ ⏳️ Dᴏɴᴇ : {0}% 
 ┣⪼ 🚀 Sᴩᴇᴇᴅ: {3}/s 
 ┣⪼ ⏰️ Eᴛᴀ: {4} 
 ╰━━━━━━━━━━━━━━━➣ </b>"""
-last_progress_texts = {}
-last_update_times = {}
 
 # Setup logging
 logging.basicConfig(
@@ -164,65 +161,96 @@ def require_auth(func):
     
     return wrapper
 
+# Store last progress message content for each message to avoid MESSAGE_NOT_MODIFIED errors
+last_progress_texts = {}
+last_update_times = {}
+
+async def progress(current, total, message, start_time, progress_type, file_name, current_chapter=None, total_chapters=None):
+    """
+    Monitor and display progress for uploads and downloads with debouncing
+    to avoid excessive message updates
+    """
+    message_id = f"{message.chat.id}:{message.id}"
+    now = time.time()
+    
+    # Implement debouncing - don't update too frequently
+    min_update_interval = 2.0  # Minimum seconds between updates
+    if message_id in last_update_times:
+        if now - last_update_times[message_id] < min_update_interval and current != total:
+            return
+    
+    diff = now - start_time
+    
+    if diff < 0.5:
+        return
+    
+    # Update more frequently, but still check content difference
+    speed = current / diff if diff > 0 else 0
+    percentage = current * 100 / total if total > 0 else 0
+    
+    # Use more decimal places to create more variation
+    percentage_str = f"{percentage:.3f}"
+    
+    elapsed_time = round(diff)
+    eta = round((total - current) / speed) if speed > 0 else 0
+    
+    current_size = humanize.naturalsize(current)
+    total_size = humanize.naturalsize(total)
+    speed_str = humanize.naturalsize(speed)
+    
+    elapsed_str = humanize.naturaltime(elapsed_time)
+    eta_str = humanize.naturaltime(eta) if eta else "0 seconds"
+    
+    chapter_info = f"Chapter {current_chapter}/{total_chapters} | " if current_chapter and total_chapters else ""
+    
+    progress_text = PROGRESS_BAR.format(
+        float(percentage_str),
+        current_size,
+        total_size,
+        speed_str,
+        eta_str
+    )
+    
+    # Create the full message text
+    full_message = f"<b>{chapter_info}{progress_type}</b>\n\n<code>{file_name}</code>\n\n{progress_text}"
+    
+    # Check if message content actually changed
+    if message_id in last_progress_texts and last_progress_texts[message_id] == full_message and current != total:
+        return
+    
+    try:
+        await message.edit(full_message)
+        # Store the content and update time for future comparison
+        last_progress_texts[message_id] = full_message
+        last_update_times[message_id] = now
+    except FloodWait as e:
+        await asyncio.sleep(e.x)
+    except Exception as e:
+        # Ignore MESSAGE_NOT_MODIFIED errors
+        if "MESSAGE_NOT_MODIFIED" not in str(e):
+            logger.error(f"Error updating progress: {e}")
+
 async def monitor_download_progress(process, status_msg, file_path, current_chapter=None, total_chapters=None):
-    """Monitor the download progress of a subprocess using the file size with improved stall detection"""
+    """Monitor the download progress of a subprocess using the file size"""
     filename = os.path.basename(file_path)
     start_time = time.time()
     last_size = 0
-    same_size_count = 0
-    max_same_size_checks = 10  # Increased number of checks before considering a stall
-    stall_timeout = 30  # Seconds to wait before considering a download truly stalled
-    last_change_time = time.time()
-    is_complete = False
     
     while process.poll() is None:
         if os.path.exists(file_path):
             current_size = os.path.getsize(file_path)
-            now = time.time()
             
-            # Check if file size hasn't changed
-            if current_size == last_size:
-                same_size_count += 1
-                
-                # Only consider a download complete if process is finished
-                # or if size hasn't changed for a long time (stall_timeout)
-                if now - last_change_time >= stall_timeout:
-                    is_stalled = True
-                else:
-                    is_stalled = False
-            else:
-                same_size_count = 0
-                last_change_time = now
-                is_stalled = False
-                
-            # For progress calculation, we need a better total size estimate
-            if process.poll() is not None:
-                # Process finished, so current size is final size
-                estimated_total = current_size
-                is_complete = True
-            elif is_stalled:
-                # If truly stalled for a long time, check if download might be complete
-                if await check_if_download_complete(process, file_path):
-                    estimated_total = current_size
-                    is_complete = True
-                else:
-                    # Handle stalled download - use larger estimate to avoid 100%
-                    estimated_total = max(current_size * 1.2, current_size + 1024 * 1024)  # At least 1MB ahead
-            else:
-                # Normal progress - use a dynamic estimate based on download speed
-                download_time = now - start_time
-                download_speed = current_size / download_time if download_time > 0 else 0
-                # Estimate total based on current rate and some buffer
-                estimated_total = max(current_size * 1.2, current_size + 1024 * 1024)  # At least 1MB ahead
+            # For progress calculation, we need to estimate total size
+            # Since we don't know it yet, we'll use a placeholder that's always ahead
+            estimated_total = max(current_size * 1.5, 1024 * 1024)  # At least 1MB ahead
             
-            # Only update UI when there's a change or periodically
-            if current_size > last_size or same_size_count % 3 == 0:
+            if current_size > last_size:
                 await progress(
                     current_size, 
                     estimated_total, 
                     status_msg, 
                     start_time, 
-                    "✅ Download Complete" if is_complete else "⬇️ Downloading", 
+                    "⬇️ Downloading", 
                     filename,
                     current_chapter,
                     total_chapters
@@ -254,178 +282,6 @@ async def monitor_download_progress(process, status_msg, file_path, current_chap
     
     return final_size
 
-async def check_if_download_complete(process, file_path):
-    """Check if a download is actually complete even if it appears stalled"""
-    # Method 1: Check output from process
-    if process.poll() is not None:
-        return True
-        
-    # Method 2: For video files, check if they can be opened properly
-    if file_path.lower().endswith(('.mp4', '.mkv', '.avi', '.mov')):
-        try:
-            # Run ffprobe to check if the file is complete
-            cmd = f"ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 {shlex.quote(file_path)}"
-            result = subprocess.run(cmd, shell=True, text=True, capture_output=True, timeout=5)
-            
-            # If we get a valid duration, file is likely complete
-            if result.returncode == 0 and result.stdout.strip():
-                try:
-                    duration = float(result.stdout.strip())
-                    return duration > 0  # If we got a duration > 0, file is likely complete
-                except ValueError:
-                    pass
-        except Exception:
-            pass
-    
-    # Method 3: For PDFs, check if they're valid
-    if file_path.lower().endswith('.pdf'):
-        try:
-            # Try to read a bit of the PDF to verify it's complete
-            with open(file_path, 'rb') as f:
-                content = f.read(1024)  # Read first KB
-                # Check for PDF header and EOF marker
-                return b'%PDF-' in content and (b'%%EOF' in content or os.path.getsize(file_path) > 1024*1024)
-        except Exception:
-            pass
-            
-    # Default: Not confirmed complete
-    return False
-
-# Improved debouncing for progress updates
-async def progress(current, total, message, start_time, progress_type, file_name, current_chapter=None, total_chapters=None):
-    """
-    Monitor and display progress for uploads and downloads with improved
-    debouncing and more accurate progress reporting
-    """
-    message_id = f"{message.chat.id}:{message.id}"
-    now = time.time()
-    
-    # Implement smarter debouncing - adjust update frequency based on file size and progress
-    min_update_interval = 2.0  # Base update interval
-    
-    # Dynamic update interval - slower updates near completion to avoid flickering
-    progress_percentage = current * 100 / total if total > 0 else 0
-    if progress_percentage > 95:
-        min_update_interval = 3.0  # Less frequent updates when almost done
-    elif progress_percentage < 10:
-        min_update_interval = 1.0  # More frequent updates at start
-        
-    if message_id in last_update_times:
-        if now - last_update_times[message_id] < min_update_interval and current != total:
-            return
-    
-    diff = now - start_time
-    
-    if diff < 0.5:
-        return
-    
-    # Calculate speed based on recent progress, not overall average
-    recent_interval = 5.0  # Calculate speed over last 5 seconds
-    if message_id in last_update_times and 'last_size' in last_progress_texts:
-        last_time = last_update_times[message_id]
-        time_diff = now - last_time
-        if time_diff > 0 and 'last_size' in last_progress_texts:
-            last_size = last_progress_texts.get('last_size', 0)
-            size_diff = current - last_size
-            recent_speed = size_diff / time_diff
-            # Use a weighted average for smoother speed display
-            speed = 0.7 * recent_speed + 0.3 * (current / diff) if diff > 0 else 0
-        else:
-            speed = current / diff if diff > 0 else 0
-    else:
-        speed = current / diff if diff > 0 else 0
-    
-    # Store current size for next speed calculation
-    last_progress_texts['last_size'] = current
-    
-    percentage = current * 100 / total if total > 0 else 0
-    
-    # Use fixed precision to avoid flickering
-    percentage_str = f"{percentage:.2f}"
-    
-    elapsed_time = round(diff)
-    eta = round((total - current) / speed) if speed > 0 else 0
-    
-    # Cap unrealistic ETAs
-    if eta > 86400:  # More than 1 day
-        eta = 86400
-    
-    current_size = humanize.naturalsize(current)
-    total_size = humanize.naturalsize(total)
-    speed_str = humanize.naturalsize(speed)
-    
-    # Format elapsed time and ETA better
-    elapsed_str = format_time(elapsed_time)
-    eta_str = format_time(eta) if eta else "0 seconds"
-    
-    chapter_info = f"Chapter {current_chapter}/{total_chapters} | " if current_chapter and total_chapters else ""
-    
-    progress_text = PROGRESS_BAR.format(
-        float(percentage_str),
-        current_size,
-        total_size,
-        speed_str,
-        eta_str
-    )
-    
-    # Create the full message text
-    full_message = f"<b>{chapter_info}{progress_type}</b>\n\n<code>{file_name}</code>\n\n{progress_text}"
-    
-    # Only update if content significantly changed or reaching key milestones
-    significant_change = False
-    
-    # Define milestone percentages where we always want to update
-    milestones = [10, 25, 50, 75, 90, 95, 99, 100]
-    for milestone in milestones:
-        if message_id in last_progress_texts and 'last_percentage' in last_progress_texts:
-            last_percentage = last_progress_texts.get('last_percentage', 0)
-            if last_percentage < milestone <= percentage:
-                significant_change = True
-                break
-    
-    # Always update if it's the final update (100%)
-    if percentage >= 99.99:
-        significant_change = True
-    
-    # Always update if progress type changed
-    if message_id in last_progress_texts and 'last_progress_type' in last_progress_texts:
-        if last_progress_texts['last_progress_type'] != progress_type:
-            significant_change = True
-    
-    # Check if message content actually changed enough to warrant an update
-    # or if enough time has passed since last update
-    if (message_id in last_progress_texts and 
-        last_progress_texts[message_id] == full_message and 
-        not significant_change and
-        current != total):
-        return
-    
-    try:
-        await message.edit(full_message)
-        # Store the content and update time for future comparison
-        last_progress_texts[message_id] = full_message
-        last_progress_texts['last_percentage'] = percentage
-        last_progress_texts['last_progress_type'] = progress_type
-        last_update_times[message_id] = now
-    except FloodWait as e:
-        await asyncio.sleep(e.x)
-    except Exception as e:
-        # Ignore MESSAGE_NOT_MODIFIED errors
-        if "MESSAGE_NOT_MODIFIED" not in str(e):
-            logger.error(f"Error updating progress: {e}")
-
-def format_time(seconds):
-    """Format time in seconds to a more readable format"""
-    if seconds < 60:
-        return f"{seconds} seconds"
-    elif seconds < 3600:
-        minutes = seconds // 60
-        return f"{minutes} minutes"
-    else:
-        hours = seconds // 3600
-        minutes = (seconds % 3600) // 60
-        return f"{hours} hours {minutes} minutes"
-        
 async def safe_edit_message(message, text):
     """Safely edit a message with proper error handling"""
     try:
@@ -682,11 +538,11 @@ async def download_file(url, file_path, file_type, status_msg=None, current_chap
         os.makedirs(os.path.dirname(file_path), exist_ok=True)
         
         # Try aria2c first for all file types
-        if await try_aria2c_download(url, file_path, file_type, status_msg, current_chapter, total_chapters):
+        if await try_ytdlp_download(url, file_path, status_msg, current_chapter, total_chapters):
             return True
             
         # Fallback for video files
-        if file_type == "video" and await try_ytdlp_download(url, file_path, status_msg, current_chapter, total_chapters):
+        if file_type == "video" and await try_aria2c_download(url, file_path, file_type, status_msg, current_chapter, total_chapters):
             return True
             
         # Fallback for other files (like PDFs)
@@ -711,12 +567,12 @@ async def try_aria2c_download(url, file_path, file_type, status_msg=None, curren
         quoted_url = f"'{url}'"
         
         # Build command for aria2c with quoted URL
-        cmd = f"aria2c --file-allocation=none -j 32 -s 32 -x 16 " \
-            f"--min-split-size=1M --max-tries=5 " \
-            f"--retry-wait=5 --check-certificate=false --continue=true " \
-            f"--console-log-level=notice --summary-interval=1 " \
-            f"-o {shlex.quote(file_path)} {quoted_url}"
-            
+        cmd = f"aria2c --file-allocation=none -j 32 -s 32 " \
+              f"--min-split-size=1M --max-connection-per-server=16 --max-tries=5 " \
+              f"--retry-wait=5 --check-certificate=false --continue=true " \
+              f"--console-log-level=notice --summary-interval=1 " \
+              f"-o {shlex.quote(file_path)} {quoted_url}"
+        
         process = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
@@ -761,7 +617,7 @@ async def try_ytdlp_download(url, file_path, status_msg=None, current_chapter=No
         quoted_url = f"'{url}'"
         
         # Build command for yt-dlp with quoted URL
-        cmd = f"yt-dlp -N 32 --no-check-certificate --no-warnings " \
+        cmd = f"yt-dlp -N 64 --no-check-certificate --no-warnings " \
               f"--prefer-ffmpeg --hls-prefer-native " \
               f"--downloader-args \"ffmpeg:-nostats -loglevel 0\" " \
               f"-o {shlex.quote(file_path)} {quoted_url}"
@@ -865,7 +721,7 @@ async def try_direct_download(url, file_path, status_msg=None, current_chapter=N
         if status_msg:
             await status_msg.edit(f"❌ Direct download error: {str(e)}")
         return False
-
+    
 async def process_chapter(client, user_id, status_msg, downloader, chapter, current_chapter, total_chapters, include_archive):
     try:
         async with download_semaphore:
@@ -878,7 +734,7 @@ async def process_chapter(client, user_id, status_msg, downloader, chapter, curr
             # Send chapter name to channel
             chapter_msg = await client.send_message(
                 DUMP_CHANNEL,
-                f"📚 ** {chapter_name}**"
+                f"📚 **{chapter_name}**"
             )
             
             # copy to user
