@@ -101,7 +101,9 @@ class TelegramUploader:
                 "udvash_uploader_bot",
                 api_id=self.api_id,
                 api_hash=self.api_hash,
-                bot_token=self.bot_token
+                bot_token=self.bot_token,
+                max_concurrent_transmissions=10,
+                workers=50
             )
             
             @self._client.on_message(filters.command("mm"))
@@ -191,6 +193,8 @@ class TelegramUploader:
                         chat_id=self.chat_id,
                         video=file_path,
                         caption=caption,
+                        height=1280,
+                        width=720,
                         thumb="abc.jpg",
                         duration=int(duration),  # Ensure integer
                         progress=update_progress
@@ -521,9 +525,7 @@ def main():
             download_marathon=not no_marathon,
             download_bangla=not no_bangla,
             download_english=not no_english,
-            content_types=content_types,
-            max_concurrent_transmissions=10,
-            workers=50
+            content_types=content_types
         )
         
         downloader.download_all(
