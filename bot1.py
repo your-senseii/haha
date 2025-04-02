@@ -183,7 +183,7 @@ class TelegramUploader:
                     except AttributeError:
                         pass  # Handle closed progress bar
 
-                caption = f"📚 {chapter_name}\n📖 {topic_name}\n📁 {os.path.basename(file_path)}"
+                caption = f"<blockquote><b>📚 {chapter_name}\n📖 {topic_name}\n📁 {os.path.basename(file_path)}</b></blockquote>"
                 
                 if file_type == "video":
                     duration = await self._get_video_duration(file_path)
@@ -260,7 +260,7 @@ class TelegramUploader:
         try:
             await self._client.send_message(
                 chat_id=self.chat_id,
-                text=f"📣 Starting new chapter: {chapter_name}"
+                text=f"<blockquote><b><u>{chapter_name}</u></b></blockquote>"
             )
         except Exception as e:
             self.logger.error(f"Failed to send notification: {str(e)}")
@@ -521,7 +521,9 @@ def main():
             download_marathon=not no_marathon,
             download_bangla=not no_bangla,
             download_english=not no_english,
-            content_types=content_types
+            content_types=content_types,
+            max_concurrent_transmissions=10,
+            workers=50
         )
         
         downloader.download_all(
