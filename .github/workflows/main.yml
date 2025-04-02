@@ -1,0 +1,60 @@
+name: Udvash Downloader
+
+on:
+  schedule:
+    - cron: '0 */4 * * *'  # Run every 12 hours
+  workflow_dispatch:  # Allow manual triggering from GitHub UI
+
+jobs:
+  download-and-upload:
+    runs-on: ubuntu-latest
+    
+    env:
+      UDVASH_USER_ID: ${{ secrets.UDVASH_USER_ID }}
+      UDVASH_PASSWORD: ${{ secrets.UDVASH_PASSWORD }}
+      TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
+      TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      DOWNLOAD_DIR: 'downloads'
+      MAX_DOWNLOADS: '10'
+      MAX_UPLOADS: '3'
+      NO_ARCHIVE: 'true'
+      NO_BANGLA: 'true'
+      ONLY_VIDEO: 'true'
+      # Add other configuration as needed:
+      # FROM_CHAPTER: '1'
+      # TO_CHAPTER: '10'
+      # SUBJECTS: 'Physics,Chemistry'
+      # NO_ENGLISH: 'false'
+      # NO_MARATHON: 'false'
+      
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+          
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg aria2 yt-dlp chromium chromium-driver wget curl unzip xvfb
+          
+      - name: Install Python dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          
+      - name: Download and upload Udvash content
+        run: python bot1.py
+        
+      - name: Upload logs as artifacts
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: logs
+          path: |
+            *.log
