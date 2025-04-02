@@ -2,7 +2,6 @@ import os
 import time
 import json
 import logging
-import argparse
 import subprocess
 import threading
 import re
@@ -267,15 +266,21 @@ class TelegramUploader:
             self.logger.error(f"Failed to send notification: {str(e)}")
 
     def _ensure_thumbnails(self):
-        thumbnails = {
-            'abc.jpg': 'https://files.catbox.moe/f0o670.jpg',
-            'bcd.jpg': 'https://files.catbox.moe/mins6u.jpg'
-        }
+        # Video thumbnail
+        if not os.path.exists('abc.jpg'):
+            print("Downloading video thumbnail...")
+            subprocess.run([
+                "wget", "-O", "abc.jpg", 
+                "https://files.catbox.moe/f0o670.jpg"  # Replace with actual URL
+            ])
         
-        for filename, url in thumbnails.items():
-            if not os.path.exists(filename):
-                self.logger.info(f"Downloading thumbnail {filename}")
-                subprocess.run(["wget", "-O", filename, url], check=True)
+        # PDF thumbnail
+        if not os.path.exists('bcd.jpg'):
+            print("Downloading PDF thumbnail...")
+            subprocess.run([
+                "wget", "-O", "bcd.jpg", 
+                "https://files.catbox.moe/mins6u.jpg"  # Replace with actual URL
+            ])
 
     def wait_for_uploads(self):
         """Wait for all queued uploads to complete"""
@@ -468,79 +473,60 @@ class UdvashDownloaderUploader(UdvashDownloader):
         super().cleanup()
         self.uploader.stop()
 
-def parse_arguments():
-    parser = argparse.ArgumentParser(description="Udvash Content Downloader and Telegram Uploader")
-    
-    # Udvash credentials
-    parser.add_argument("--user_id", required=True, help="Udvash user ID")
-    parser.add_argument("--password", required=True, help="Udvash password")
-    
-    # Telegram credentials
-    parser.add_argument("--api_id", required=True, type=int, help="Telegram API ID")
-    parser.add_argument("--api_hash", required=True, help="Telegram API hash")
-    parser.add_argument("--bot_token", required=True, help="Telegram bot token")
-    parser.add_argument("--chat_id", required=True, help="Telegram chat ID")
-    
-    # Download options
-    parser.add_argument("--download_dir", default="downloads", help="Directory to save downloads")
-    parser.add_argument("--max_downloads", type=int, default=3, help="Maximum concurrent downloads")
-    parser.add_argument("--max_uploads", type=int, default=3, help="Maximum concurrent uploads")
-    
-    # Chapter range
-    parser.add_argument("--from_chapter", type=int, help="Starting chapter number")
-    parser.add_argument("--to_chapter", type=int, help="Ending chapter number")
-    
-    # Subject filter
-    parser.add_argument("--subjects", help="Comma-separated list of subjects to download")
-    
-    # Content type options (mutually exclusive group)
-    content_type_group = parser.add_mutually_exclusive_group()
-    content_type_group.add_argument("--only_video", action="store_true", help="Download and upload only video content")
-    content_type_group.add_argument("--only_pdf", action="store_true", help="Download and upload only PDF content")
-    
-    # Content options
-    parser.add_argument("--no_bangla", action="store_true", help="Do not download Bangla content")
-    parser.add_argument("--no_english", action="store_true", help="Do not download English content")
-    parser.add_argument("--no_marathon", action="store_true", help="Do not download Marathon content")
-    parser.add_argument("--no_archive", action="store_true", help="Do not download Archive content")
-    
-    return parser.parse_args()
 
 def main():
-    args = parse_arguments()
-    
+    # Get configuration from environment variables
+    user_id = os.environ.get('UDVASH_USER_ID', '')
+    password = os.environ.get('UDVASH_PASSWORD', '')
+    api_id = int(os.environ.get('TELEGRAM_API_ID', '0'))
+    api_hash = os.environ.get('TELEGRAM_API_HASH', '')
+    bot_token = os.environ.get('TELEGRAM_BOT_TOKEN', '')
+    chat_id = os.environ.get('TELEGRAM_CHAT_ID', '')
+    download_dir = os.environ.get('DOWNLOAD_DIR', 'downloads')
+    max_downloads = int(os.environ.get('MAX_DOWNLOADS', '3'))
+    max_uploads = int(os.environ.get('MAX_UPLOADS', '3'))
+    from_chapter = int(os.environ.get('FROM_CHAPTER', '0')) or None
+    to_chapter = int(os.environ.get('TO_CHAPTER', '0')) or None
+    subjects = os.environ.get('SUBJECTS', '')
+    only_video = os.environ.get('ONLY_VIDEO', 'false').lower() == 'true'
+    only_pdf = os.environ.get('ONLY_PDF', 'false').lower() == 'true'
+    no_bangla = os.environ.get('NO_BANGLA', 'false').lower() == 'true'
+    no_english = os.environ.get('NO_ENGLISH', 'false').lower() == 'true'
+    no_marathon = os.environ.get('NO_MARATHON', 'false').lower() == 'true'
+    no_archive = os.environ.get('NO_ARCHIVE', 'false').lower() == 'true'
+
     specific_subjects = None
-    if args.subjects:
-        specific_subjects = [s.strip() for s in args.subjects.split(",")]
+    if subjects:
+        specific_subjects = [s.strip() for s in subjects.split(",")]
     
     # Determine content types to download and upload
     content_types = ["video", "pdf"]  # Default: download and upload both
-    if args.only_video:
+    if only_video:
         content_types = ["video"]
-    elif args.only_pdf:
+    elif only_pdf:
         content_types = ["pdf"]
     
     try:
         downloader = UdvashDownloaderUploader(
-            user_id=args.user_id,
-            password=args.password,
-            api_id=args.api_id,
-            api_hash=args.api_hash,
-            bot_token=args.bot_token,
-            chat_id=args.chat_id,
-            max_downloads=args.max_downloads,
-            max_uploads=args.max_uploads,
-            download_dir=args.download_dir,
-            download_archive=not args.no_archive,
-            download_marathon=not args.no_marathon,
-            download_bangla=not args.no_bangla,
-            download_english=not args.no_english,
+            user_id=user_id,
+            password=password,
+            api_id=api_id,
+            api_hash=api_hash,
+            bot_token=bot_token,
+            chat_id=chat_id,
+            max_downloads=max_downloads,
+            max_uploads=max_uploads,
+            download_dir=download_dir,
+            download_archive=not no_archive,
+            download_marathon=not no_marathon,
+            download_bangla=not no_bangla,
+            download_english=not no_english,
             content_types=content_types
         )
         
         downloader.download_all(
-            from_chapter=args.from_chapter,
-            to_chapter=args.to_chapter,
+            from_chapter=from_chapter,
+            to_chapter=to_chapter,
             specific_subjects=specific_subjects
         )
     except Exception as e:
