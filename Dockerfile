@@ -14,7 +14,7 @@ RUN apt-get update && apt-get install -y \
     unzip \
     xvfb \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
-
+    
 # Copy requirements first to leverage Docker cache
 COPY requirements.txt .
 

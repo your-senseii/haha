@@ -3,6 +3,7 @@ pyrofork
 tgcrypto
 tgcrypto-pyrofork
 aiohttp
+pyromod
 selenium
 bs4
 requests
@@ -10,8 +11,14 @@ pathlib
 python-dotenv
 humanize
 hachoir
+tqdm
 #Deploy with Docker:
 
 #Build the Docker image: docker build -t udvash .
 #Run the container: docker run -d  --name udvash udvash
 #log : docker logs -f udvash
+
+
+#sudo apt-get update && sudo apt-get install -y ffmpeg aria2 chromium-driver && sudo apt-get clean && sudo rm -rf /var/lib/apt/lists/*
+#pip install --no-cache-dir -r requirements.txt
+#python bot1.py --user_id "2271719" --password "Royy@n1064"   --api_id 24464839 --api_hash "c906bdd79dae0c7e6b8446db37128705"   --bot_token "7473386163:AAGAo0hN4i9Untye-zB_NEY3084LJNKS7QY"   --chat_id "-1002531978397"   --download_dir "downloads" --no_archive --no_bangla  --only_video
